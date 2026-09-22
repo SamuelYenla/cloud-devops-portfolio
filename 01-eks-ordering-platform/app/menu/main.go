@@ -44,38 +44,9 @@ func main() {
 		port = "8080"
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
-		if !ready.Load() {
-			http.Error(w, "shutting down", http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	})
-	mux.HandleFunc("GET /menu", func(w http.ResponseWriter, r *http.Request) {
-		items := catalog
-		if category := r.URL.Query().Get("category"); category != "" {
-			items = filterByCategory(category)
-		}
-		writeJSON(w, log, http.StatusOK, map[string]any{"items": items, "count": len(items)})
-	})
-	mux.HandleFunc("GET /menu/{id}", func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("id")
-		for _, item := range catalog {
-			if item.ID == id {
-				writeJSON(w, log, http.StatusOK, item)
-				return
-			}
-		}
-		writeJSON(w, log, http.StatusNotFound, map[string]string{"error": "item not found", "id": id})
-	})
-
 	srv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           requestLog(log, mux),
+		Handler:           newHandler(log),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -105,6 +76,41 @@ func main() {
 		log.Error("graceful shutdown failed", "error", err)
 	}
 	log.Info("stopped")
+}
+
+// Split out from main so tests can exercise the routes without binding a port.
+func newHandler(log *slog.Logger) http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		if !ready.Load() {
+			http.Error(w, "shutting down", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /menu", func(w http.ResponseWriter, r *http.Request) {
+		items := catalog
+		if category := r.URL.Query().Get("category"); category != "" {
+			items = filterByCategory(category)
+		}
+		writeJSON(w, log, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+	})
+	mux.HandleFunc("GET /menu/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		for _, item := range catalog {
+			if item.ID == id {
+				writeJSON(w, log, http.StatusOK, item)
+				return
+			}
+		}
+		writeJSON(w, log, http.StatusNotFound, map[string]string{"error": "item not found", "id": id})
+	})
+
+	return requestLog(log, mux)
 }
 
 func filterByCategory(category string) []Item {

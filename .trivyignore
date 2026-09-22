@@ -1,0 +1,15 @@
+# Accepted risks, with reasons. Anything listed here is a deliberate decision,
+# not an unreviewed finding — revisit if the context below stops being true.
+
+# AWS-0132: "S3 encryption should use Customer Managed Keys"
+#
+# The Terraform state bucket uses SSE-S3 (AES256) rather than a KMS CMK.
+# Accepted because a CMK costs roughly $1/month plus per-request charges for a
+# personal portfolio project, and adds a kms:Decrypt dependency to every
+# terraform run. State here contains no credentials: secrets are not passed as
+# Terraform variables, and the bucket is private, versioned, and blocks all
+# public access.
+#
+# Revisit if this account ever holds state for something with real users, or if
+# state starts carrying sensitive values.
+AWS-0132

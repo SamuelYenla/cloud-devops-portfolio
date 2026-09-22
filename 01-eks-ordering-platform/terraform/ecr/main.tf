@@ -3,9 +3,10 @@ resource "aws_ecr_repository" "this" {
 
   name = "${var.name}/${each.value}"
 
-  # Tags stay mutable so a manual `latest` push during development isn't rejected.
-  # CI pushes commit-SHA tags, which are effectively immutable anyway.
-  image_tag_mutability = "MUTABLE"
+  # CI publishes one commit-SHA tag per build and manifests reference that SHA,
+  # so nothing needs to overwrite a tag. Immutability then makes a deployed tag
+  # a permanent record of exactly what shipped.
+  image_tag_mutability = "IMMUTABLE"
 
   # This repo is torn down at the end of each session; without this, destroy
   # fails on any repository that still holds images.

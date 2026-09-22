@@ -1,0 +1,182 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Nothing here needs write access or AWS credentials; the image is built but
+# never pushed. Publishing lives in a separate workflow with its own permissions.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.27"
+
+jobs:
+  go:
+    name: go (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Extend as orders and payments-mock land.
+        service: [menu]
+    defaults:
+      run:
+        working-directory: 01-eks-ordering-platform/app/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          # The services are stdlib-only, so there is no go.sum to key a cache
+          # on and nothing to download.
+          cache: false
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed on: $unformatted"
+            gofmt -d .
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # -race matters here: readiness is flipped from the signal handler while
+      # requests are being served.
+      - name: test
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: coverage report
+        run: go tool cover -func=coverage.out
+
+      - name: build
+        run: go build ./...
+
+  terraform:
+    name: terraform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.16.3"
+
+      - name: fmt
+        run: terraform fmt -check -recursive -diff 01-eks-ordering-platform/terraform
+
+      # -backend=false so validation needs no S3 access or AWS credentials.
+      # Stacks are discovered rather than listed, so a new one is covered the
+      # day it is added.
+      - name: validate every stack
+        run: |
+          set -euo pipefail
+          failed=0
+          for dir in 01-eks-ordering-platform/terraform/*/; do
+            if ! compgen -G "${dir}*.tf" > /dev/null; then
+              continue
+            fi
+            echo "::group::${dir}"
+            if terraform -chdir="$dir" init -backend=false -input=false >/dev/null \
+               && terraform -chdir="$dir" validate; then
+              echo "ok"
+            else
+              echo "::error::terraform validate failed in ${dir}"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $failed
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: tflint
+        run: |
+          set -euo pipefail
+          tflint --init
+          failed=0
+          for dir in 01-eks-ordering-platform/terraform/*/; do
+            if ! compgen -G "${dir}*.tf" > /dev/null; then
+              continue
+            fi
+            echo "::group::${dir}"
+            tflint --chdir="$dir" || failed=1
+            echo "::endgroup::"
+          done
+          exit $failed
+
+  security:
+    name: security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Misconfiguration scan over Terraform and Kubernetes manifests.
+      # Downloaded modules are excluded: third-party module source is not ours
+      # to fix, and failing CI on it would train everyone to ignore this job.
+      # Accepted findings live in .trivyignore with written reasons.
+      - name: trivy config
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: 01-eks-ordering-platform
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          trivyignores: .trivyignore
+          tf-exclude-downloaded-modules: true
+
+      - name: trivy filesystem (vulns and secrets)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+  image:
+    name: image (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    needs: [go]
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [menu]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Built for the architecture the EKS nodes actually run, and loaded
+      # locally rather than pushed so the scan below has something to read.
+      - name: build
+        uses: docker/build-push-action@v6
+        with:
+          context: 01-eks-ordering-platform/app/${{ matrix.service }}
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ matrix.service }}:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: trivy image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: ${{ matrix.service }}:ci
+          severity: HIGH,CRITICAL
+          exit-code: "1"
