@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ordering
+  labels:
+    # Enforce the restricted Pod Security Standard; workloads that try to run
+    # as root or escalate privileges are rejected at admission.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

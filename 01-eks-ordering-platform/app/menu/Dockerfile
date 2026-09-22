@@ -15,5 +15,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/menu /menu
 EXPOSE 8080
-USER nonroot:nonroot
+# Numeric UID, not the "nonroot" name: kubelet cannot verify a non-numeric user
+# against runAsNonRoot and refuses to start the container.
+USER 65532:65532
 ENTRYPOINT ["/menu"]
