@@ -31,9 +31,9 @@ jobs:
       run:
         working-directory: 01-eks-ordering-platform/app/${{ matrix.service }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           # The services are stdlib-only, so there is no go.sum to key a cache
@@ -67,7 +67,7 @@ jobs:
     name: terraform
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -122,24 +122,22 @@ jobs:
     name: security
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Misconfiguration scan over Terraform and Kubernetes manifests.
-      # Downloaded modules are excluded: third-party module source is not ours
-      # to fix, and failing CI on it would train everyone to ignore this job.
-      # Accepted findings live in .trivyignore with written reasons.
+      # Module exclusion and the accepted-findings file both come from
+      # trivy.yaml, so a local run and this job behave identically.
       - name: trivy config
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: 01-eks-ordering-platform
+          trivy-config: trivy.yaml
           severity: HIGH,CRITICAL
           exit-code: "1"
-          trivyignores: .trivyignore
-          tf-exclude-downloaded-modules: true
 
       - name: trivy filesystem (vulns and secrets)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -156,7 +154,7 @@ jobs:
       matrix:
         service: [menu]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: docker/setup-buildx-action@v3
 
@@ -174,7 +172,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: trivy image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: ${{ matrix.service }}:ci

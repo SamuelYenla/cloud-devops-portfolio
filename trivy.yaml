@@ -1,0 +1,9 @@
+# Shared Trivy settings so local runs and CI behave identically.
+misconfiguration:
+  terraform:
+    # Third-party module source is not ours to fix. Failing the build on it
+    # would only teach everyone to ignore this job.
+    exclude-downloaded-modules: true
+
+# Accepted findings, each with its reasoning, live here.
+ignorefile: .trivyignore
