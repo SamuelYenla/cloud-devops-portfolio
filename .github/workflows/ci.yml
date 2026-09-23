@@ -25,16 +25,12 @@ env:
 
 jobs:
   go:
-    name: go (${{ matrix.service }})
+    name: go
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # Extend as orders and payments-mock land.
-        service: [menu]
+    # One module covering every service, so this runs once rather than per service.
     defaults:
       run:
-        working-directory: 01-eks-ordering-platform/app/${{ matrix.service }}
+        working-directory: 01-eks-ordering-platform/app
     steps:
       - uses: actions/checkout@v5
 
@@ -150,6 +146,15 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: "1"
 
+      # trivy checks the manifests for insecure settings but not for whether
+      # they are valid Kubernetes at all. A typo in a field name is silently
+      # ignored by the API server, so it needs schema validation of its own.
+      - name: validate kubernetes manifests
+        run: |
+          docker run --rm -v "${PWD}/01-eks-ordering-platform/k8s":/k8s \
+            ghcr.io/yannh/kubeconform:latest \
+            -strict -summary -kubernetes-version 1.31.0 /k8s
+
   image:
     name: image (${{ matrix.service }})
     runs-on: ubuntu-latest
@@ -157,7 +162,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [menu]
+        service: [menu, orders, payments-mock]
     steps:
       - uses: actions/checkout@v5
 
@@ -168,7 +173,8 @@ jobs:
       - name: build
         uses: docker/build-push-action@v6
         with:
-          context: 01-eks-ordering-platform/app/${{ matrix.service }}
+          context: 01-eks-ordering-platform/app
+          build-args: SERVICE=${{ matrix.service }}
           platforms: linux/amd64
           push: false
           load: true
@@ -194,7 +200,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [menu]
+        service: [menu, orders, payments-mock]
     # id-token is granted here and nowhere else, so this is the only job in the
     # workflow that can mint an OIDC token and assume the AWS role.
     permissions:
@@ -244,7 +250,8 @@ jobs:
         if: steps.exists.outputs.found == 'false'
         uses: docker/build-push-action@v6
         with:
-          context: 01-eks-ordering-platform/app/${{ matrix.service }}
+          context: 01-eks-ordering-platform/app
+          build-args: SERVICE=${{ matrix.service }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_NAMESPACE }}/${{ matrix.service }}:${{ steps.tag.outputs.tag }}
