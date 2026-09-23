@@ -69,21 +69,23 @@ easy to draw wrong and worth stating plainly:
 | Terraform: ECR repositories with lifecycle rules | Built |
 | `menu` service (Go) + manifests | Built, running |
 | CI: build, test, lint, security scan | Built, green |
+| CD: publish to ECR from CI via OIDC, no stored keys | Built |
 | `orders`, `payments-mock` services | Not built yet |
-| CD: OIDC push to ECR, automated deploy | Not built yet |
+| Automated deploy to the cluster | Not built yet — see below |
 | RDS, ArgoCD, Prometheus/Grafana, ingress | Not built yet |
 
 ## Layout
 
 ```
 terraform/
-  bootstrap/   state bucket + budget alarms — created once, never destroyed
-  network/     VPC, subnets, NAT gateway, routing
-  eks/         cluster, managed node group, core addons
-  ecr/         one repository per service
-app/menu/      Go service, Dockerfile, tests
-k8s/           namespace + per-service manifests
-docs/          architecture decisions, costs, runbook
+  bootstrap/     state bucket + budget alarms — created once, never destroyed
+  network/       VPC, subnets, NAT gateway, routing
+  eks/           cluster, managed node group, core addons
+  ecr/           one repository per service
+  github-oidc/   IAM role GitHub Actions assumes to publish images
+app/menu/        Go service, Dockerfile, tests
+k8s/             namespace + per-service manifests
+docs/            architecture decisions, costs, runbook
 ```
 
 Each Terraform directory is an independent stack with its own state key. `eks` reads the
@@ -147,6 +149,18 @@ cd terraform/ecr     && terraform destroy   # force_delete drops images with the
 cd ../eks            && terraform destroy   # delete node groups first if any failed to create
 cd ../network        && terraform destroy
 ```
+
+## How images get published
+
+A push to `main` that passes every check ends with an image in ECR, tagged with the commit SHA.
+There are no AWS access keys stored in GitHub: the workflow mints an OIDC token, and an IAM role
+whose trust policy accepts exactly one repository on exactly one branch exchanges it for
+temporary credentials. `id-token: write` is granted to the publishing job alone.
+
+Deployment is still manual — `kubectl set image`, which the workflow prints in its run summary.
+Automating it would mean CI holding credentials to a cluster that is destroyed at the end of
+every session, so every run against a torn-down cluster would fail. That belongs with a GitOps
+controller that reconciles when the cluster exists, rather than a pipeline step that assumes it.
 
 ## Further reading
 
