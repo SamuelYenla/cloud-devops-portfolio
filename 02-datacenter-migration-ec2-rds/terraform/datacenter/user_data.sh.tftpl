@@ -1,0 +1,108 @@
+#!/bin/bash
+# Bootstrap the simulated corporate data center host.
+#
+# Runs the wiki application and MySQL 5.7 on one box. The sizing sheet listed
+# two hosts; collapsing them saves an instance and changes nothing about the
+# migration, since the dump still crosses the peering link to RDS.
+#
+# MySQL 5.7 runs as a container because 5.7 packages no longer install cleanly
+# on current Ubuntu. The version matters: migrating 5.7 -> 8.0 is the point.
+set -euxo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+
+# --- MySQL 5.7 -------------------------------------------------------------
+apt-get install -y docker.io mysql-client
+systemctl enable --now docker
+
+docker run -d --name mysql57 --restart unless-stopped \
+  -p 3306:3306 \
+  -e MYSQL_ROOT_PASSWORD='${db_password}' \
+  -e MYSQL_DATABASE='${db_name}' \
+  -e MYSQL_USER='${db_user}' \
+  -e MYSQL_PASSWORD='${db_password}' \
+  mysql:5.7 \
+  --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+
+# The container accepts connections well after `docker run` returns.
+for i in $(seq 1 60); do
+  if mysqladmin ping -h 127.0.0.1 -u root -p'${db_password}' --silent 2>/dev/null; then
+    break
+  fi
+  sleep 5
+done
+
+# Allow the app user in from the target VPC as well as locally: after peering,
+# the migration dump is pulled from a host in the other VPC.
+mysql -h 127.0.0.1 -u root -p'${db_password}' <<SQL
+CREATE USER IF NOT EXISTS '${db_user}'@'%' IDENTIFIED BY '${db_password}';
+GRANT ALL PRIVILEGES ON ${db_name}.* TO '${db_user}'@'%';
+FLUSH PRIVILEGES;
+SQL
+
+# --- Application prerequisites ---------------------------------------------
+# The package list is taken verbatim from the original project's prerequisites
+# sheet; see docs/requirements.md section 2.2.
+apt-get install -y \
+  python3 python3-dev python3-pip python3-venv \
+  default-libmysqlclient-dev build-essential pkg-config \
+  libpq-dev libxml2-dev libxslt1-dev libldap2-dev libsasl2-dev libffi-dev
+
+install -d -o ubuntu -g ubuntu /opt/wiki
+cat > /opt/wiki/requirements.txt <<'REQS'
+${requirements}
+REQS
+
+cat > /opt/wiki/app.py <<'APPPY'
+${app_py}
+APPPY
+
+cat > /opt/wiki/schema.sql <<'SCHEMA'
+${schema_sql}
+SCHEMA
+
+python3 -m venv /opt/wiki/venv
+/opt/wiki/venv/bin/pip install --upgrade pip
+/opt/wiki/venv/bin/pip install -r /opt/wiki/requirements.txt
+
+# --- Schema and seed data --------------------------------------------------
+mysql -h 127.0.0.1 -u root -p'${db_password}' < /opt/wiki/schema.sql
+
+# Seed rows give the migration something to verify against: the dry run
+# compares counts and a checksum on both sides.
+python3 - <<'SEED' | mysql -h 127.0.0.1 -u root -p'${db_password}' ${db_name}
+n = ${seed_pages}
+print("INSERT INTO pages (slug, title, body, author) VALUES")
+rows = []
+for i in range(1, n + 1):
+    rows.append(
+        "('runbook-%04d','Runbook %04d',"
+        "'Operational procedure %04d migrated from the corporate data center.','seed')"
+        % (i, i, i)
+    )
+print(",\n".join(rows) + ";")
+SEED
+
+# --- Service ---------------------------------------------------------------
+cat > /etc/systemd/system/wiki.service <<'UNIT'
+[Unit]
+Description=ABC Company Wiki
+After=network.target docker.service
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/wiki
+Environment=DB_HOST=127.0.0.1
+Environment=DB_NAME=${db_name}
+Environment=DB_USER=${db_user}
+Environment=DB_PASSWORD=${db_password}
+ExecStart=/opt/wiki/venv/bin/gunicorn --bind 0.0.0.0:8000 --workers 2 app:app
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now wiki.service
