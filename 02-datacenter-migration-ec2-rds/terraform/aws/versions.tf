@@ -6,6 +6,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 6.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
   }
 }
 
@@ -15,7 +19,7 @@ provider "aws" {
   default_tags {
     tags = {
       Project   = "cloud-devops-portfolio"
-      Component = "network"
+      Component = "aws"
       ManagedBy = "terraform"
     }
   }

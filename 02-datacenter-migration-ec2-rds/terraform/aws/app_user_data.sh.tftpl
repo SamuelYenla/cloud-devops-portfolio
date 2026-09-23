@@ -1,0 +1,72 @@
+#!/bin/bash
+# Bootstrap an application tier instance.
+#
+# The instance has no public IP and no SSH key. Egress goes through the NAT
+# gateway; access is via SSM Session Manager.
+set -euxo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+
+# Package list taken verbatim from the original project's prerequisites sheet;
+# see docs/requirements.md section 2.2.
+apt-get install -y \
+  python3 python3-dev python3-pip python3-venv \
+  default-libmysqlclient-dev build-essential pkg-config \
+  libpq-dev libxml2-dev libxslt1-dev libldap2-dev libsasl2-dev libffi-dev \
+  mysql-client awscli
+
+install -d -o ubuntu -g ubuntu /opt/wiki
+
+cat > /opt/wiki/requirements.txt <<'REQS'
+${requirements}
+REQS
+
+cat > /opt/wiki/app.py <<'APPPY'
+${app_py}
+APPPY
+
+python3 -m venv /opt/wiki/venv
+/opt/wiki/venv/bin/pip install --upgrade pip
+/opt/wiki/venv/bin/pip install -r /opt/wiki/requirements.txt
+
+# The database address is read at startup rather than baked in. Cutover is
+# then an SSM parameter change plus a restart, not a new launch template
+# version and an instance refresh.
+cat > /opt/wiki/start.sh <<'START'
+#!/bin/bash
+set -euo pipefail
+
+REGION="${region}"
+DB_HOST=$(aws ssm get-parameter --region "$REGION" \
+  --name "${db_host_param}" --query 'Parameter.Value' --output text)
+DB_PASSWORD=$(aws ssm get-parameter --region "$REGION" --with-decryption \
+  --name "${db_password_param}" --query 'Parameter.Value' --output text)
+
+export DB_HOST DB_PASSWORD
+export DB_NAME="${db_name}"
+export DB_USER="${db_user}"
+
+exec /opt/wiki/venv/bin/gunicorn --bind 0.0.0.0:8000 --workers 2 app:app
+START
+chmod +x /opt/wiki/start.sh
+
+cat > /etc/systemd/system/wiki.service <<'UNIT'
+[Unit]
+Description=ABC Company Wiki
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/wiki
+ExecStart=/opt/wiki/start.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now wiki.service

@@ -15,35 +15,37 @@ what is deliberately out of scope.
 | Path | Contents |
 |---|---|
 | `terraform/datacenter/` | Simulated source: VPC + one host running Flask and MySQL 5.7 |
-| `terraform/network/` | Target VPC: public / private / database subnets, NAT instance |
-| `terraform/peering/` | VPC peering and routes between the two |
-| `terraform/data/` | RDS MySQL 8.0 |
-| `terraform/compute/` | ALB + ASG running the wiki |
+| `terraform/aws/` | Target VPC, peering, RDS MySQL 8.0, ALB + ASG |
 | `app/wiki/` | The application being migrated |
-| `scripts/` | `migrate.sh` (dry run / cutover / rollback), `teardown.sh` |
-| `docs/` | `requirements.md`, `architecture.md`, `runbook.md`, `cost.md` |
+| `scripts/` | `migrate.sh` (dry-run / cutover / rollback), `teardown.sh` |
+| `docs/` | `requirements.md`, `cost.md` |
 
-Apply in the order listed; destroy in reverse. Each stack reads the previous ones' outputs via
-`terraform_remote_state`.
+Two stacks, not five. Everything in `aws` is created and destroyed in the same session, so
+Terraform's own dependency graph orders it — splitting would only add apply/destroy cycles and
+remote-state plumbing. `01` splits its stacks because its state bucket has `prevent_destroy`
+and a genuinely different lifecycle.
+
+Apply `datacenter` then `aws`; destroy in reverse. `aws` reads the data center's outputs
+through a single `terraform_remote_state` data source.
 
 ## Cost
 
-About **$0.07/hour**, so a four-hour session costs roughly **$0.29**. The ALB is the largest
-single item at 43%. See [docs/cost.md](docs/cost.md) for the breakdown and the two tradeoffs
-that keep it there: a `t4g.nano` NAT instance instead of a NAT gateway, and Multi-AZ RDS behind
-a toggle rather than on by default.
+About **$0.11/hour**, so a four-hour session costs roughly **$0.45**. The NAT gateway and ALB
+are half of it. See [docs/cost.md](docs/cost.md) for the breakdown, the two toggles that stay
+off by default (`multi_az`, `desired_capacity`), and why the first draft's NAT *instance* was
+reverted — it saved $29/month but only 16 cents per session, for the most fragile component in
+the build.
 
-> Run `scripts/teardown.sh` at the end of every session. A forgotten `destroy` costs ~$12/week,
-> and the account-wide $50 budget alert would not fire until day 29.
+> Run `scripts/teardown.sh` at the end of every session. It destroys both stacks and then
+> checks the account for survivors. At ~$2.65/day a forgotten stack takes ~19 days to trip the
+> $50 budget alert, so the script is the real control, not the budget.
 
 ## Status
 
 | Stack | State |
 |---|---|
 | `datacenter` | Written, validates |
-| `network` | Written, validates |
-| `peering` | Not started |
-| `data` | Not started |
-| `compute` | Not started |
+| `aws` | Written, validates |
+| `scripts/` | Written, syntax-checked |
 
-Nothing has been applied to AWS yet.
+Nothing has been applied to AWS yet, so no `user_data` script has run for real.

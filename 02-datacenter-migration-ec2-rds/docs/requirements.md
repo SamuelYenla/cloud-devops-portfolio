@@ -78,8 +78,8 @@ inside a screenshot.
          └────┬─────┘                  └────┬─────┘
               └──────────────┬──────────────┘
                         ┌────▼────┐              ┌──────────────┐
-                        │   RDS   │              │ NAT instance │→ IGW
-                        │ MySQL 8 │              │  (t4g.nano)  │
+                        │   RDS   │              │ NAT gateway  │→ IGW
+                        │ MySQL 8 │              │   (single)   │
                         └─────────┘              └──────────────┘
                        database subnets
 
@@ -114,9 +114,15 @@ Region `us-east-1`. Name prefix `dc-migration` (`var.name`). All resources tagge
 
 Bootstrap seeds the wiki schema and ~500 rows so the migration has verifiable content.
 
-### 4.2 `terraform/network/` — target VPC
+### 4.2 `terraform/aws/` — target environment
 
-Built with `terraform-aws-modules/vpc/aws ~> 6.0`, as `01` does.
+Network, database and application tiers in one stack. They are created and destroyed together
+in every session, so splitting them would add `init`/`apply`/`destroy` cycles and
+`terraform_remote_state` plumbing without buying any lifecycle independence. `01` splits its
+stacks because its state bucket carries `prevent_destroy` and genuinely does have a different
+lifecycle.
+
+#### Network — `terraform-aws-modules/vpc/aws ~> 6.0`
 
 | Resource | Spec | Why |
 |---|---|---|
@@ -126,47 +132,49 @@ Built with `terraform-aws-modules/vpc/aws ~> 6.0`, as `01` does.
 | Database subnets × 2 | `10.20.20.0/24`, `10.20.21.0/24` | RDS subnet group requires ≥ 2 AZs |
 | DB subnet group | `create_database_subnet_group = true` | Module-provided; no hand-rolled group |
 | Internet gateway | — | ALB and NAT egress |
-| **NAT instance** | `t4g.nano`, source/dest check off, iptables masquerade | **`enable_nat_gateway = false`.** $0.0042/hr vs the gateway's $0.045/hr — ~$29/month saved. Worse than a gateway (no managed failover, capped bandwidth, a host to patch); acceptable because nothing here serves real traffic. `01` made the opposite call because EKS needs the throughput. |
-| Private route table | default → NAT instance ENI | — |
+| NAT gateway | `single_nat_gateway = true` | A `t4g.nano` NAT instance would save ~$29/month, but only under 24/7 operation. Against the teardown rule the managed gateway costs ~$0.16 more **per session** — not enough to justify hand-rolled iptables masquerade as a dependency of every demo. See [cost.md](cost.md). |
 
-### 4.3 `terraform/peering/` — the link
+#### Peering
 
 | Resource | Spec | Why |
 |---|---|---|
 | VPC peering connection | DC ↔ target, auto-accept (same account/region) | The connection the original never had |
-| Route: target private/db → `10.10.0.0/16` | — | Outbound to the source |
-| Route: DC public → `10.20.0.0/16` | — | Return path |
+| Route: target private → `10.10.0.0/16` | — | Outbound to the source |
+| Route: DC public → `10.20.0.0/16` | — | Return path, written into the DC stack's route table |
 
 Free within a region. Cross-AZ peering transfer is $0.01/GB each way — negligible at this data
 size, but a real cost driver at production scale.
 
-### 4.4 `terraform/data/` — RDS
+#### Database
 
 | Resource | Spec | Why |
 |---|---|---|
-| `aws_db_instance` | MySQL 8.0, `db.t4g.micro`, 20 GB gp3 | 20 GB is the RDS minimum |
+| `aws_db_instance` | MySQL 8.0, `db.t4g.micro`, 20 GB gp3 | 20 GB is the RDS minimum. Source is 5.7; the upgrade is part of the migration. |
 | | `storage_encrypted = true` | Free; no reason not to |
 | | `backup_retention_period = 0` | Nothing here is worth retaining; avoids snapshot storage cost |
-| | `multi_az = var.multi_az` (**default `false`**) | Multi-AZ doubles the RDS bill for a property no demo exercises. Flip to `true` for one apply, screenshot the standby, revert — the evidence the original lacked, without paying for it every session. |
+| | `multi_az = var.multi_az` (**default `false`**) | Multi-AZ doubles the RDS bill for a property no demo exercises. Flip to `true` for one apply, capture evidence of the standby, revert. |
 | | `skip_final_snapshot = true`, `deletion_protection = false` | Teardown rule |
-| `random_password` | 32 chars | — |
-| SSM Parameter (`SecureString`) | `/dc-migration/db/password` | **Parameter Store standard tier is free; Secrets Manager is $0.40/secret/month.** Also deletes cleanly — Secrets Manager's 7-day soft delete collides with the next apply. |
-| Security group | 3306 **from the app SG by reference**, not CIDR | A CIDR rule would admit anything in the subnet |
+| `random_password` | 32 chars, no specials | Avoids quoting problems in the bootstrap shell |
+| SSM Parameter `/dc-migration/db/password` | `SecureString` | **Parameter Store standard tier is free; Secrets Manager is $0.40/secret/month.** Also deletes immediately — Secrets Manager's 7-day soft delete would collide with the next apply. |
+| SSM Parameter `/dc-migration/db/host` | `String`, `ignore_changes = [value]` | **The cutover switch.** Starts at the DC host, moves to the RDS endpoint. Terraform stops managing the value because `migrate.sh` writes it. |
+| Security group | 3306 **from the app SG by reference**, not CIDR | A CIDR rule would admit anything that lands in the subnet |
 
-### 4.5 `terraform/compute/` — application tier
+#### Application tier
 
 | Resource | Spec | Why |
 |---|---|---|
-| ALB | internet-facing, public subnets, HTTP :80 | Largest line item (43% of cost) but carries the private-subnet and multi-AZ story |
-| Target group | HTTP :8000, health check `/healthz` | — |
-| Launch template | `t4g.micro`, Ubuntu 22.04 arm64, IMDSv2 required | — |
-| Auto Scaling group | `min 1`, `max 2`, `desired = var.desired_capacity` (**default 1**) | Bump to 2 to screenshot cross-AZ balancing, then revert. The ASG *proves* the HA claim; running two instances permanently doesn't make it more true. |
-| IAM role + instance profile | `AmazonSSMManagedInstanceCore` + read on the one SSM parameter | Least privilege: one parameter, not `ssm:*` |
-| Security group (app) | 8000 from ALB SG only; egress all | — |
+| ALB | internet-facing, public subnets, HTTP :80 | Largest cost line (~43%) but carries the private-subnet and multi-AZ story |
+| Target group | HTTP :8000, health check `/healthz` | `/healthz` tests the DB connection, so an instance that cannot reach its database is replaced rather than counted healthy |
+| Launch template | `t4g.micro`, Ubuntu 22.04 arm64, IMDSv2 required, no public IP | — |
+| Auto Scaling group | `min 1`, `max 2`, `desired = var.desired_capacity` (**default 1**), `health_check_type = "ELB"` | Bump to 2 to capture cross-AZ balancing, then revert. The ASG proves the HA claim; running two instances permanently does not make it more true. |
+| IAM role + instance profile | `AmazonSSMManagedInstanceCore`, plus `ssm:GetParameter` on **the two parameters** and `kms:Decrypt` scoped by `kms:ViaService` | Least privilege: two named parameters, not `ssm:*` |
+| Security group (app) | 8000 from the ALB SG only | A public IP would not make an instance reachable even if one were attached |
 | Security group (ALB) | 80 from `0.0.0.0/0` | — |
 
-`user_data` installs the §2.2 package list, reads the DB password from Parameter Store, and runs
-the wiki under gunicorn.
+`user_data` installs the §2.2 package list and writes `/opt/wiki/start.sh`, which reads both SSM
+parameters at startup and execs gunicorn. Reading the host at startup is what makes cutover a
+parameter change plus a service restart rather than a new launch template version and an
+instance refresh.
 
 ### 4.6 Reused, not created
 
@@ -188,16 +196,16 @@ Sizing (§2), prerequisites (§2.2), naming, CIDR allocation, cost model ([cost.
 Deliverable: this document.
 
 ### Phase 2 — Implementation
-Apply in dependency order. Each stack consumes the previous ones' outputs via
-`terraform_remote_state`:
 
-| # | Stack | Consumes |
-|---|---|---|
-| 1 | `datacenter` | — |
-| 2 | `network` | — |
-| 3 | `peering` | `datacenter`: vpc_id, route table; `network`: vpc_id, route tables |
-| 4 | `data` | `network`: vpc_id, db subnet group, app SG |
-| 5 | `compute` | `network`: vpc_id, subnets; `data`: RDS endpoint, SSM parameter name |
+Two stacks. `datacenter` is applied first and destroyed last; `aws` reads its outputs through a
+single `terraform_remote_state` data source.
+
+| # | Stack | Consumes | Contents |
+|---|---|---|---|
+| 1 | `datacenter` | — | Source VPC and host |
+| 2 | `aws` | `datacenter`: `vpc_id`, `vpc_cidr`, `route_table_id`, `host_private_ip` | Target VPC, peering, RDS, ALB + ASG |
+
+Everything inside `aws` is ordered by Terraform's own dependency graph rather than by hand.
 
 ### Phase 3 — Go-Live
 1. **Dry run** — `mysqldump` from the DC host over peering, restore to RDS, compare row counts
@@ -241,7 +249,7 @@ The build is done when all of these hold:
 1. `terraform fmt -check` and `terraform validate` pass in all five stacks.
 2. All five stacks apply cleanly in dependency order.
 3. The DC host serves the wiki and its MySQL 5.7 holds the seed rows.
-4. A private-subnet host reaches the internet **through the NAT instance**.
+4. A private-subnet host reaches the internet **through the NAT gateway**.
 5. `mysql -h <dc-host>` succeeds from the target VPC — the link the original never had.
 6. The ALB serves the wiki; app instances have **no public IPs** and are reachable only via SSM.
 7. `migrate.sh` dry run: row counts and checksums match.
