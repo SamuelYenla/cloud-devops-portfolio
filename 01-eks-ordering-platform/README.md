@@ -46,8 +46,9 @@ flowchart TD
     IGW -.->|image pull| ECR
 ```
 
-Two `menu` pods run one per node, behind a ClusterIP Service. Three details in that diagram are
-easy to draw wrong and worth stating plainly:
+Each service runs two pods, one per node, behind a ClusterIP Service. `orders` calls the other
+two over cluster DNS. Three details in that diagram are easy to draw wrong and worth stating
+plainly:
 
 - **The control plane is not in this VPC.** It runs in an AWS-managed account. What sits in the
   private subnets is a pair of requester-managed ENIs — `describe-network-interfaces` shows them
@@ -67,10 +68,9 @@ easy to draw wrong and worth stating plainly:
 | Terraform: VPC, subnets, NAT, routing | Built |
 | Terraform: EKS cluster, managed node group, core addons | Built |
 | Terraform: ECR repositories with lifecycle rules | Built |
-| `menu` service (Go) + manifests | Built, running |
+| `menu`, `orders`, `payments-mock` services (Go) + manifests | Built |
 | CI: build, test, lint, security scan | Built, green |
 | CD: publish to ECR from CI via OIDC, no stored keys | Built |
-| `orders`, `payments-mock` services | Not built yet |
 | Automated deploy to the cluster | Not built yet — see below |
 | RDS, ArgoCD, Prometheus/Grafana, ingress | Not built yet |
 
@@ -83,13 +83,21 @@ terraform/
   eks/           cluster, managed node group, core addons
   ecr/           one repository per service
   github-oidc/   IAM role GitHub Actions assumes to publish images
-app/menu/        Go service, Dockerfile, tests
+app/
+  cmd/menu/        catalogue
+  cmd/orders/      prices from menu, authorizes through payments-mock
+  cmd/payments-mock/
+  internal/httpx/  JSON, request logging, drain-aware server
+  Dockerfile       shared; SERVICE build-arg selects the binary
 k8s/             namespace + per-service manifests
 docs/            architecture decisions, costs, runbook
 ```
 
 Each Terraform directory is an independent stack with its own state key. `eks` reads the
 network's outputs through `terraform_remote_state` rather than hardcoding subnet IDs.
+
+The services are one Go module rather than three. They share the same HTTP plumbing, and a
+single Dockerfile means they cannot drift apart in base image or security posture.
 
 ## Standing it up
 
@@ -104,40 +112,79 @@ cd ../network && terraform init && terraform apply
 cd ../eks     && terraform init && terraform apply    # ~15 min, mostly the control plane
 cd ../ecr     && terraform init && terraform apply
 
-# 3. Build and publish the service image
+# 3. Images. CI publishes these on every merge to main, so this is only needed
+#    to build from a working tree that has not been pushed.
+REGISTRY="$(cd terraform/ecr && terraform output -raw registry)"
 aws ecr get-login-password --region us-east-1 \
-  | docker login --username AWS --password-stdin "$(cd terraform/ecr && terraform output -raw registry)"
+  | docker login --username AWS --password-stdin "$REGISTRY"
 
-cd app/menu
-REPO="$(cd ../../terraform/ecr && terraform output -json repository_urls | jq -r .menu)"
-docker buildx build --platform linux/amd64 -t "${REPO}:$(git rev-parse --short HEAD)" --push .
+cd app
+for service in menu orders payments-mock; do
+  docker buildx build --platform linux/amd64 \
+    --build-arg "SERVICE=${service}" \
+    -t "${REGISTRY}/ordering-platform/${service}:$(git rev-parse --short HEAD)" --push .
+done
 
 # 4. Deploy
 aws eks update-kubeconfig --name ordering-platform-cluster --region us-east-1
 kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/menu/
-kubectl rollout status deployment/menu -n ordering
+kubectl apply -R -f k8s/
+kubectl rollout status deployment/orders -n ordering
 ```
 
-The image **must** be built for `linux/amd64`. The nodes are amd64, so an image built natively
-on an Apple Silicon machine will pull successfully and then crash-loop with `exec format error`.
+Two things that will bite otherwise:
+
+- Images **must** be built for `linux/amd64`. The nodes are amd64, so an image built natively on
+  an Apple Silicon machine pulls successfully and then crash-loops with `exec format error`.
+- The manifests pin image tags by commit SHA. Deploying a working tree means updating those
+  tags, or the cluster runs whatever that SHA last pointed at.
 
 ## Trying it
 
-The Service is ClusterIP — there is no ingress yet, deliberately, since a load balancer costs
+Every Service is ClusterIP — there is no ingress yet, deliberately, since a load balancer costs
 more than the rest of the stack combined at this scale.
 
 ```bash
-kubectl port-forward -n ordering service/menu 8080:80
+kubectl port-forward -n ordering service/orders 8080:80
 ```
 
+Placing an order is the interesting path, because `orders` has to reach both other services to
+answer: it prices each line from `menu`, then authorizes through `payments-mock`.
+
 ```bash
-curl localhost:8080/menu                    # full catalogue
-curl 'localhost:8080/menu?category=drinks'  # filtered
-curl localhost:8080/menu/burger-double      # one item
-curl localhost:8080/healthz                 # liveness
-curl localhost:8080/readyz                  # readiness
+curl -X POST localhost:8080/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"items":[{"item_id":"burger-classic","quantity":2},
+                {"item_id":"fries-regular","quantity":1}]}'
 ```
+
+```jsonc
+{
+  "id": "ord_0001",
+  "status": "confirmed",
+  "total_cents": 2147,   // 899*2 + 349, priced by menu rather than the client
+  "payment_id": "pay_0001"
+}
+```
+
+Worth trying, because each returns something different:
+
+```bash
+# Unavailable item -> 409. onion-rings is out of stock in the catalogue.
+curl -X POST localhost:8080/orders -H 'Content-Type: application/json' \
+  -d '{"items":[{"item_id":"onion-rings","quantity":1}]}'
+
+# Over the decline threshold -> 201, status payment_declined. The order exists;
+# the payment did not succeed.
+curl -X POST localhost:8080/orders -H 'Content-Type: application/json' \
+  -d '{"items":[{"item_id":"burger-double","quantity":50}]}'
+
+# Scale menu to zero, then order -> 502. orders reports the dependency failure
+# rather than pretending it priced the line.
+kubectl scale deployment/menu -n ordering --replicas=0
+```
+
+`menu` and `payments-mock` can be reached the same way, by port-forwarding their own Service.
 
 ## Tearing down
 

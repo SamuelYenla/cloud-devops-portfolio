@@ -19,20 +19,35 @@ means no real traffic, not a dead process.
 
 ## Deploying a new image
 
+CI publishes an image per service on every merge to `main`, so normally there is nothing to
+build — just point the deployment at the tag the pipeline produced. The run summary prints it.
+
 ```bash
-cd app/menu
-REPO="$(cd ../../terraform/ecr && terraform output -json repository_urls | jq -r .menu)"
+SERVICE=orders                       # or menu, payments-mock
+REGISTRY="$(cd terraform/ecr && terraform output -raw registry)"
 SHA="$(git rev-parse --short HEAD)"
 
-docker buildx build --platform linux/amd64 -t "${REPO}:${SHA}" --push .
-kubectl set image -n ordering deployment/menu "menu=${REPO}:${SHA}"
-kubectl rollout status deployment/menu -n ordering
+kubectl set image -n ordering "deployment/${SERVICE}" \
+  "${SERVICE}=${REGISTRY}/ordering-platform/${SERVICE}:${SHA}"
+kubectl rollout status "deployment/${SERVICE}" -n ordering
 ```
 
-Update the tag in `k8s/menu/deployment.yaml` to match, or the next `kubectl apply` will roll it
+To build from a working tree that has not been pushed:
+
+```bash
+cd app
+docker buildx build --platform linux/amd64 \
+  --build-arg "SERVICE=${SERVICE}" \
+  -t "${REGISTRY}/ordering-platform/${SERVICE}:${SHA}" --push .
+```
+
+Update the tag in `k8s/<service>/deployment.yaml` to match, or the next `kubectl apply` rolls it
 back to whatever is committed.
 
-Rollback is `kubectl rollout undo deployment/menu -n ordering`.
+Rollback is `kubectl rollout undo deployment/<service> -n ordering`.
+
+`orders` depends on `menu` and `payments-mock`. Deploy those first if several are changing, so
+`orders` is never calling an endpoint that is mid-rollout.
 
 ---
 

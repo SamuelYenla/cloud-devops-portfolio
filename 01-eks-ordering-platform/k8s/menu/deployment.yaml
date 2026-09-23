@@ -44,7 +44,7 @@ spec:
               app.kubernetes.io/name: menu
       containers:
         - name: menu
-          image: 188050967390.dkr.ecr.us-east-1.amazonaws.com/ordering-platform/menu:1000b45
+          image: 188050967390.dkr.ecr.us-east-1.amazonaws.com/ordering-platform/menu:322a526
           ports:
             - name: http
               containerPort: 8080

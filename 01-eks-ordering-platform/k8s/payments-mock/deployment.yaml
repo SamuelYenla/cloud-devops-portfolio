@@ -39,7 +39,7 @@ spec:
               app.kubernetes.io/name: payments-mock
       containers:
         - name: payments-mock
-          image: 188050967390.dkr.ecr.us-east-1.amazonaws.com/ordering-platform/payments-mock:PLACEHOLDER
+          image: 188050967390.dkr.ecr.us-east-1.amazonaws.com/ordering-platform/payments-mock:322a526
           ports:
             - name: http
               containerPort: 8080

@@ -39,7 +39,7 @@ spec:
               app.kubernetes.io/name: orders
       containers:
         - name: orders
-          image: 188050967390.dkr.ecr.us-east-1.amazonaws.com/ordering-platform/orders:PLACEHOLDER
+          image: 188050967390.dkr.ecr.us-east-1.amazonaws.com/ordering-platform/orders:322a526
           ports:
             - name: http
               containerPort: 8080
