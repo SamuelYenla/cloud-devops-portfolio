@@ -47,16 +47,24 @@ These are usage-based and small here, but they are the ones that surprise people
 
 ## Teardown
 
-The rule is that every session ends with `terraform destroy`. Order matters — see the teardown
-section in the [project README](../README.md).
+Destroy what bills by the hour, keep what bills by the byte.
 
-`bootstrap` is the exception and is never destroyed. It holds the state bucket for everything
-else, its bucket carries `prevent_destroy`, and it costs essentially nothing: S3 storage for a
-few hundred kilobytes of state, plus a budget alarm that is free.
+**Destroyed at the end of each session** — `eks` and `network`. That is the $0.18/hr: control
+plane, nodes, and the NAT gateway. Everything expensive is in those two stacks.
 
-What survives a teardown: the state bucket, the budget alarm, and the ECR repositories' *config*
-in state — but not their images, since `force_delete = true` drops images along with the
-repositories. A fresh session rebuilds and re-pushes.
+**Kept running** — `bootstrap`, `ecr` and `github-oidc`. Between them these cost a few cents a
+month, and destroying them causes real problems:
+
+- `bootstrap` holds the state for every other stack, and its bucket carries `prevent_destroy`.
+- `ecr` receives an image from CI on every merge to `main`. Destroying it turns the pipeline red
+  on every subsequent push until someone re-applies it. The lifecycle rules already cap storage,
+  so leaving it costs fractions of a cent.
+- `github-oidc` is an IAM role and an OIDC provider. Neither is billed at all.
+
+This was originally written the other way round, with `ecr` destroyed alongside everything else.
+Adding CD made that wrong: a pipeline that publishes to a registry cannot have the registry
+deleted nightly. Worth noting as a general point — teardown rules written before CI exists tend
+to assume nothing runs while you are away.
 
 ## A note on failed builds
 

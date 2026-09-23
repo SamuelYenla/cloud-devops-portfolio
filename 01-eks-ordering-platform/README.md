@@ -141,14 +141,24 @@ curl localhost:8080/readyz                  # readiness
 
 ## Tearing down
 
-Destroy in reverse dependency order. `bootstrap` is deliberately left alone — it holds the state
-for everything else and its bucket is protected by `prevent_destroy`.
+Only two stacks cost anything worth reclaiming, and they are the two that get destroyed:
 
 ```bash
-cd terraform/ecr     && terraform destroy   # force_delete drops images with the repos
-cd ../eks            && terraform destroy   # delete node groups first if any failed to create
-cd ../network        && terraform destroy
+cd terraform/eks     && terraform destroy   # delete node groups first if any failed to create
+cd ../network        && terraform destroy   # NAT gateway lives here
 ```
+
+**Three stacks stay up deliberately.** Together they cost a few cents a month, and destroying
+them breaks things that should keep working while the cluster is gone:
+
+| Stack | Why it stays |
+|---|---|
+| `bootstrap` | Holds the state for every other stack; its bucket carries `prevent_destroy`. |
+| `ecr` | CI publishes an image on every merge to `main`. Destroy this and the pipeline fails on every push until it is re-applied. Storage is $0.10/GB-month against images of a few MB, capped by lifecycle rules. |
+| `github-oidc` | The IAM role CI assumes. An IAM role costs nothing, and recreating it means re-verifying the trust policy each time. |
+
+That is the whole rule: **destroy what bills by the hour, keep what bills by the byte.** The
+cluster and the NAT gateway are ~$0.18/hr between them; everything else is rounding error.
 
 ## How images get published
 
