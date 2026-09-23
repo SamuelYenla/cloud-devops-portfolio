@@ -7,36 +7,57 @@ ordering platform. Built with Terraform, deployed from ECR, tested and scanned i
 
 ```mermaid
 flowchart TD
-    subgraph AWS["AWS account · us-east-1"]
-        subgraph VPC["VPC 10.0.0.0/16"]
-            subgraph Public["Public subnets · 2 AZs"]
-                NAT["NAT gateway<br/>single, shared"]
-                IGW["Internet gateway"]
-            end
-            subgraph Private["Private subnets · 2 AZs"]
-                N1["Node<br/>t3.medium spot"]
-                N2["Node<br/>t3.medium spot"]
-            end
-        end
+    GH["GitHub Actions<br/>build · test · scan"]
+    TF["Terraform CLI"]
+
+    subgraph Managed["AWS-managed account"]
         CP["EKS control plane<br/>Kubernetes 1.31"]
-        ECR["ECR<br/>immutable tags"]
-        S3["S3<br/>Terraform state"]
     end
 
-    GH["GitHub Actions<br/>build · test · scan"] --> ECR
-    CP --- N1
-    CP --- N2
-    ECR --> N1
-    ECR --> N2
-    N1 --> NAT
-    N2 --> NAT
+    subgraph AWS["AWS account · us-east-1"]
+        ECR["ECR<br/>immutable tags"]
+        S3["S3<br/>Terraform state"]
+
+        subgraph VPC["VPC 10.0.0.0/16"]
+            IGW["Internet gateway"]
+
+            subgraph Public["Public subnets · 2 AZs"]
+                NAT["NAT gateway<br/>single, shared"]
+            end
+
+            subgraph Private["Private subnets · 2 AZs"]
+                ENI["EKS ENIs<br/>private endpoint"]
+                N1["Node · AZ-1<br/>t3.medium spot"]
+                N2["Node · AZ-2<br/>t3.medium spot"]
+            end
+        end
+    end
+
+    GH -->|push| ECR
+    TF -.->|state| S3
+
+    N1 -->|API · in-VPC| ENI
+    N2 -->|API · in-VPC| ENI
+    ENI --- CP
+
+    N1 -->|egress| NAT
+    N2 -->|egress| NAT
     NAT --> IGW
+    IGW -.->|image pull| ECR
 ```
 
-Two `menu` pods run one per node, behind a ClusterIP Service. The nodes sit in private subnets
-and reach the internet through a single NAT gateway — one rather than one per AZ, which halves
-the largest line on the bill at the cost of AZ-level redundancy that a portfolio project does
-not need.
+Two `menu` pods run one per node, behind a ClusterIP Service. Three details in that diagram are
+easy to draw wrong and worth stating plainly:
+
+- **The control plane is not in this VPC.** It runs in an AWS-managed account. What sits in the
+  private subnets is a pair of requester-managed ENIs — `describe-network-interfaces` shows them
+  owned by this account but requested by an AWS-owned one. Node-to-API traffic reaches the
+  control plane through those ENIs and never leaves the VPC.
+- **Image pulls leave the VPC and come back.** There are no VPC endpoints here, so a node pulling
+  from ECR egresses through the NAT gateway and the internet gateway to ECR's public endpoint.
+  That path is metered per GB, which is part of why the image is kept at 8MB.
+- **One NAT gateway, shared across both AZs.** One per AZ is the textbook layout; this halves the
+  largest line on the bill in exchange for AZ-level redundancy a portfolio project does not need.
 
 ## What exists today
 
