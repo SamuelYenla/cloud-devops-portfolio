@@ -14,9 +14,14 @@ data "tls_certificate" "github" {
 }
 
 resource "aws_iam_openid_connect_provider" "github" {
-  url             = "https://${local.oidc_host}"
-  client_id_list  = ["sts.amazonaws.com"]
-  thumbprint_list = [data.tls_certificate.github.certificates[0].sha1_fingerprint]
+  url            = "https://${local.oidc_host}"
+  client_id_list = ["sts.amazonaws.com"]
+
+  # The last certificate in the chain is the root CA, which is what AWS expects.
+  # certificates[0] is the leaf, and pinning that rotates every few months.
+  thumbprint_list = [
+    data.tls_certificate.github.certificates[length(data.tls_certificate.github.certificates) - 1].sha1_fingerprint
+  ]
 }
 
 data "aws_iam_policy_document" "assume_role" {
