@@ -27,6 +27,23 @@ variable "github_branch" {
   default     = "main"
 }
 
+# GitHub now issues subjects carrying immutable numeric IDs alongside the names,
+# e.g. repo:owner@83687702/repo@1379351988:ref:refs/heads/main. Pinning the IDs
+# is what stops trust transferring to whoever claims the login after a rename.
+# Find them with:
+#   gh api repos/OWNER/REPO --jq '{repo: .id, owner: .owner.id}'
+variable "github_owner_id" {
+  description = "Numeric GitHub account ID of the repository owner"
+  type        = number
+  default     = 83687702
+}
+
+variable "github_repository_id" {
+  description = "Numeric GitHub repository ID"
+  type        = number
+  default     = 1379351988
+}
+
 variable "ecr_repository_prefix" {
   description = "ECR namespace the CI role may push to"
   type        = string

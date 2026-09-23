@@ -7,7 +7,7 @@ output "oidc_provider_arn" {
   value = aws_iam_openid_connect_provider.github.arn
 }
 
-output "trusted_subject" {
-  description = "The only OIDC subject permitted to assume the role"
-  value       = "repo:${var.github_repository}:ref:refs/heads/${var.github_branch}"
+output "trusted_subjects" {
+  description = "The OIDC subjects permitted to assume the role"
+  value       = local.trusted_subjects
 }

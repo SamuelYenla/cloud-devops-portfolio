@@ -5,6 +5,19 @@ locals {
   oidc_host = "token.actions.githubusercontent.com"
 
   ecr_repositories = "arn:${data.aws_partition.current.partition}:ecr:${var.region}:${data.aws_caller_identity.current.account_id}:repository/${var.ecr_repository_prefix}/*"
+
+  owner = split("/", var.github_repository)[0]
+  repo  = split("/", var.github_repository)[1]
+
+  # GitHub issues one of two subject formats depending on the account. The
+  # second carries immutable numeric IDs, which is what this repository
+  # actually receives — verified by decoding a live token, since the trust
+  # policy fails silently with "Not authorized" when the format is wrong.
+  # Both are listed so a change in GitHub's behaviour cannot break publishing.
+  trusted_subjects = [
+    "repo:${var.github_repository}:ref:refs/heads/${var.github_branch}",
+    "repo:${local.owner}@${var.github_owner_id}/${local.repo}@${var.github_repository_id}:ref:refs/heads/${var.github_branch}",
+  ]
 }
 
 # Read the current certificate rather than pinning a thumbprint by hand, so a
@@ -41,12 +54,12 @@ data "aws_iam_policy_document" "assume_role" {
     }
 
     # The sub claim is the whole security boundary. Without it any repository on
-    # GitHub could assume this role, so it is pinned to one repo and one branch
-    # rather than using a wildcard.
+    # GitHub could assume this role. Both accepted values name one repository
+    # and one branch — no wildcards.
     condition {
       test     = "StringEquals"
       variable = "${local.oidc_host}:sub"
-      values   = ["repo:${var.github_repository}:ref:refs/heads/${var.github_branch}"]
+      values   = local.trusted_subjects
     }
   }
 }
